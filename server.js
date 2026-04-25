@@ -34,11 +34,13 @@ async function fetchJson(url, opts = {}) {
     headers: { Accept: 'application/json', 'User-Agent': 'TenderWatch/1.0' },
     ...opts
   });
-  if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + url);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error('HTTP ' + res.status + ' ' + body.slice(0,200));
+  }
   return res.json();
 }
 
-// Returns notices as-is, no Claude scoring
 function normalise(notices, source, country) {
   return notices
     .filter(n => n.title && n.title.length > 5)
@@ -54,7 +56,6 @@ async function playwrightScrape({ url, searchTerms, extractFromResponse, extract
   });
   const page = await ctx.newPage();
   const intercepted = [];
-
   page.on('response', async response => {
     const u = response.url();
     if (!u.includes('/api/') && !u.includes('/search') && !u.includes('notices') && !u.includes('query')) return;
@@ -66,7 +67,6 @@ async function playwrightScrape({ url, searchTerms, extractFromResponse, extract
       if (items && items.length) intercepted.push(...items);
     } catch (e) {}
   });
-
   const allDomResults = [];
   for (const term of searchTerms) {
     const pageUrl = typeof url === 'function' ? url(term) : url;
@@ -75,11 +75,8 @@ async function playwrightScrape({ url, searchTerms, extractFromResponse, extract
       await page.waitForTimeout(2000);
       const domItems = await page.evaluate(extractFromDom);
       if (domItems && domItems.length) allDomResults.push(...domItems);
-    } catch (e) {
-      console.warn('[' + label + '] failed for "' + term + '": ' + e.message);
-    }
+    } catch (e) { console.warn('[' + label + '] ' + e.message); }
   }
-
   await browser.close();
   const seen = new Set();
   const merged = [];
@@ -103,12 +100,10 @@ async function fetchDoffinBelowThreshold(keywords) {
         id: n.noticeId || n.id || String(Math.random()).slice(2,10),
         title: n.title || n.noticeName || n.subject || n.tittel || '',
         org: (n.contractingAuthority && n.contractingAuthority.name) || (n.buyer && n.buyer.name) || n.publisherName || '',
-        country: 'NO',
-        deadline: n.deadlineForSubmission || n.submissionDeadline || n.frist || 'unknown',
+        country: 'NO', deadline: n.deadlineForSubmission || n.submissionDeadline || n.frist || 'unknown',
         published: n.publicationDate || n.publishedDate || 'unknown',
         value: n.estimatedValue ? 'NOK ' + (n.estimatedValue/1000000).toFixed(1) + 'M' : 'N/A',
-        url: n.noticeId ? 'https://doffin.no/notices/' + n.noticeId : (n.id ? 'https://doffin.no/notices/' + n.id : ''),
-        keywords: [], isNew: false
+        url: n.noticeId ? 'https://doffin.no/notices/' + n.noticeId : '', keywords: [], isNew: false
       })).filter(n => n.title);
     },
     extractFromDom: () => {
@@ -139,12 +134,10 @@ async function fetchUdbudBelowThreshold(keywords) {
         id: n.id || n.noticeId || String(Math.random()).slice(2,10),
         title: n.title || n.subject || n.titel || '',
         org: (n.contractingAuthority && n.contractingAuthority.name) || n.buyer || n.ordregiver || '',
-        country: 'DK',
-        deadline: n.deadline || n.submissionDeadline || n.frist || 'unknown',
+        country: 'DK', deadline: n.deadline || n.submissionDeadline || n.frist || 'unknown',
         published: n.publicationDate || n.publishedDate || 'unknown',
         value: n.estimatedValue ? 'DKK ' + (n.estimatedValue/1000000).toFixed(1) + 'M' : 'N/A',
-        url: n.id ? 'https://udbud.dk/find-udbud/' + n.id : '',
-        keywords: [], isNew: false
+        url: n.id ? 'https://udbud.dk/find-udbud/' + n.id : '', keywords: [], isNew: false
       })).filter(n => n.title);
     },
     extractFromDom: () => {
@@ -163,16 +156,16 @@ async function fetchUdbudBelowThreshold(keywords) {
 }
 
 async function fetchTED(countryFilter, keywords) {
-  const kws = (keywords || DEFAULT_KEYWORDS).filter(k => k.split(' ').length <= 3).slice(0, 8);
-  const kwQuery = kws.map(k => 'TD="' + k + '"').join(' OR ');
+  // Use CPV codes only — reliable, no syntax issues with TED v3 API
   const cpvQuery = CPV_CODES.map(c => 'CPV=' + c).join(' OR ');
   const country = countryFilter ? ' AND CY=' + countryFilter : '';
+  const query = '(' + cpvQuery + ')' + country;
+  console.log('[TED] query:', query);
   const data = await fetchJson('https://api.ted.europa.eu/v3/notices/search', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      query: '(' + kwQuery + ' OR ' + cpvQuery + ')' + country,
-      fields: ['ND','TI','CY','CA-NAME','PC','DT','RD','DI'],
+      query, fields: ['ND','TI','CY','CA-NAME','PC','DT','RD','DI'],
       page: 1, limit: 25, scope: 'ACTIVE', paginationMode: 'PAGE_NUMBER'
     })
   });
@@ -188,6 +181,7 @@ async function fetchTED(countryFilter, keywords) {
     url: r.ND && r.ND[0] ? 'https://ted.europa.eu/en/notice/' + r.ND[0] + '/html' : '',
     keywords: [], isNew: false, source: src, isLive: true
   }));
+  console.log('[TED] returned', raw.length, 'results');
   return raw.filter(n => n.title);
 }
 
@@ -201,10 +195,7 @@ async function fetchFindATender() {
     const tender = r.tender || {};
     const buyer = (r.parties || []).find(p => p.roles && p.roles.includes('buyer'));
     return {
-      id: r.id || '',
-      title: tender.title || '',
-      org: (buyer && buyer.name) || '',
-      country: 'GB',
+      id: r.id || '', title: tender.title || '', org: (buyer && buyer.name) || '', country: 'GB',
       deadline: (tender.tenderPeriod && tender.tenderPeriod.endDate && tender.tenderPeriod.endDate.split('T')[0]) || 'unknown',
       published: (r.date && r.date.split('T')[0]) || 'unknown',
       value: (tender.value && tender.value.amount) ? 'GBP ' + (tender.value.amount/1000000).toFixed(2) + 'M' : 'N/A',
@@ -222,30 +213,28 @@ app.post('/search', async (req, res) => {
   const results = { ted:[], doffin:[], udbud:[], fat:[] };
   const errors = {};
   console.log('[search] sources=' + sources.join(','));
-
   await Promise.allSettled([
     sources.includes('ted') && fetchTED(null, keywords)
-      .then(r => { results.ted = r; console.log('[TED] ' + r.length); })
+      .then(r => { results.ted = r; console.log('[TED]', r.length); })
       .catch(e => { errors.ted = e.message; console.error('[TED]', e.message); }),
     sources.includes('doffin') && Promise.all([fetchTED('NO', keywords), fetchDoffinBelowThreshold(keywords)])
       .then(([above, below]) => {
         const seen = new Set(above.map(t => t.id));
         results.doffin = [...above, ...below.filter(t => !seen.has(t.id))];
-        console.log('[Doffin] ' + results.doffin.length);
+        console.log('[Doffin]', results.doffin.length);
       })
       .catch(e => { errors.doffin = e.message; console.error('[Doffin]', e.message); }),
     sources.includes('udbud') && Promise.all([fetchTED('DK', keywords), fetchUdbudBelowThreshold(keywords)])
       .then(([above, below]) => {
         const seen = new Set(above.map(t => t.id));
         results.udbud = [...above, ...below.filter(t => !seen.has(t.id))];
-        console.log('[udbud] ' + results.udbud.length);
+        console.log('[udbud]', results.udbud.length);
       })
       .catch(e => { errors.udbud = e.message; console.error('[udbud]', e.message); }),
     sources.includes('fat') && fetchFindATender()
-      .then(r => { results.fat = r; console.log('[FAT] ' + r.length); })
+      .then(r => { results.fat = r; console.log('[FAT]', r.length); })
       .catch(e => { errors.fat = e.message; console.error('[FAT]', e.message); })
   ]);
-
   res.json({ results, errors, fetchedAt: new Date().toISOString() });
 });
 
@@ -257,18 +246,14 @@ app.get('/search/:source', async (req, res) => {
     if (source === 'ted') { data = await fetchTED(null, keywords); }
     else if (source === 'doffin') {
       const [a,b] = await Promise.all([fetchTED('NO',keywords),fetchDoffinBelowThreshold(keywords)]);
-      const seen = new Set(a.map(t=>t.id));
-      data = [...a,...b.filter(t=>!seen.has(t.id))];
+      const seen = new Set(a.map(t=>t.id)); data = [...a,...b.filter(t=>!seen.has(t.id))];
     } else if (source === 'udbud') {
       const [a,b] = await Promise.all([fetchTED('DK',keywords),fetchUdbudBelowThreshold(keywords)]);
-      const seen = new Set(a.map(t=>t.id));
-      data = [...a,...b.filter(t=>!seen.has(t.id))];
+      const seen = new Set(a.map(t=>t.id)); data = [...a,...b.filter(t=>!seen.has(t.id))];
     } else if (source === 'fat') { data = await fetchFindATender(); }
     else return res.status(400).json({ error: 'Unknown source' });
     res.json({ results: data, fetchedAt: new Date().toISOString() });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 const PORT = process.env.PORT || 3001;
