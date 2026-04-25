@@ -1,0 +1,20 @@
+{
+  "name": "tenderwatch-backend",
+  "version": "1.0.0",
+  "description": "TenderWatch proxy backend for Doffin and udbud.dk scraping",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "setup": "npx playwright install chromium"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.52.0",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "playwright": "^1.44.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
